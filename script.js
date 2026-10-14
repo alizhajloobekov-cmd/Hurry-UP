@@ -600,15 +600,75 @@ function toWish(id,d){const sc=SCENES[d.scene]||SCENES["Комната"];return{
 
 function setLocal(){mode="local";done=new Set(LS.get("uspet-done",[]));notes=LS.get("uspet-notes",{});userWishes=LS.get("uspet-wishes",[]).map(w=>toWish(w.id,w));canWrite=true;route(true)}
 
+const SB_URL=(window.SUPABASE_URL||"").trim(),SB_KEY=(window.SUPABASE_ANON_KEY||"").trim();
+const SB_ON=!!(window.supabase&&window.supabase.createClient&&/^https:\/\/.+/.test(SB_URL)&&SB_KEY&&!/ВСТАВЬТЕ|YOUR/i.test(SB_URL+SB_KEY));
+let fb=false,fbUser=null,authMsg="",sb=null,loginOpen=false,loginBusy=false,loginDraft={email:"",pass:""};
+const OWNERS=(window.OWNER_EMAILS||[]).map(x=>String(x).toLowerCase().trim()).filter(x=>x&&!/ваша|your/i.test(x));
+function rerender(){const y=scrollY;route(false,true);scrollTo(0,y)}
+function dbErr(err){console.error(err);if(!fb||!err)return;const c=String(err.code||""),m=String(err.message||"");
+ if(c==="42P01"||c==="PGRST205"||/does not exist|schema cache/i.test(m))authMsg="В базе нет таблиц. Откройте Supabase → SQL Editor, вставьте setup.sql и нажмите Run.";
+ else if(c==="42501"||/row-level security|permission/i.test(m))authMsg="База не дала сохранить: войдите под почтой владельца.";
+ else authMsg="Ошибка базы: "+m;rerender()}
+function subscribe(db){
+ db.collection("wishes").onSnapshot(s=>{userWishes=s.docs.map(d=>toWish(d.id,d.data()||{})).sort((a,b)=>a.createdAt-b.createdAt);route(true)},err=>dbErr(err));
+ db.collection("notes").onSnapshot(s=>{const m={};s.docs.forEach(d=>{const x=d.data()||{};if(x.text)m[d.id]={text:String(x.text),date:String(x.date||"")}});notes=m;route(true)},err=>dbErr(err));
+ db.doc("marks/done").onSnapshot(s=>{const d=s.exists?s.data():null;done=new Set(d&&Array.isArray(d.ids)?d.ids:[]);route(true)},err=>dbErr(err));
+}
+/* Supabase adapter with the small document-style API the page already uses */
+function sbAdapter(client){
+ const L={},cache={wishes:[],notes:[],marks:[]};
+ const on=(t,f)=>(L[t]=L[t]||[]).push(f),emit=t=>(L[t]||[]).forEach(f=>f());
+ const chk=r=>{if(r.error){const e=r.error;e.code=e.code||"";throw e}return r.data};
+ async function load(t){cache[t]=chk(await client.from(t).select("*"))||[];emit(t)}
+ const D=(id,d)=>({id,exists:true,data:()=>d});
+ return{
+  collection(t){return{
+   onSnapshot(cb,err){on(t,()=>cb({docs:t==="wishes"?cache.wishes.map(w=>D(w.id,{title:w.title,cat:w.cat,scene:w.scene,story:w.story,createdAt:Number(w.created_at)||0})):cache.notes.map(n=>D(n.item_id,{text:n.text,date:n.date}))}));load(t).catch(err)},
+   async add(d){chk(await client.from("wishes").insert({title:d.title,cat:d.cat,scene:d.scene,story:d.story,created_at:d.createdAt}));await load("wishes")}}},
+  doc(path){const [t,id]=path.split("/");return{
+   onSnapshot(cb,err){on("marks",()=>cb({exists:true,data:()=>({ids:cache.marks.map(m=>m.item_id)})}));load("marks").catch(err)},
+   async set(d){
+    if(t==="marks"){const cur=new Set(cache.marks.map(m=>m.item_id)),nx=new Set(d.ids),add=[...nx].filter(x=>!cur.has(x)),rem=[...cur].filter(x=>!nx.has(x));
+     if(add.length)chk(await client.from("marks").upsert(add.map(x=>({item_id:x,done_at:Date.now()}))));
+     if(rem.length)chk(await client.from("marks").delete().in("item_id",rem));await load("marks")}
+    else if(t==="notes"){chk(await client.from("notes").upsert({item_id:id,text:d.text,date:d.date,updated_at:d.updatedAt}));await load("notes")}},
+   async delete(){const [tb,col]=t==="wishes"?["wishes","id"]:["notes","item_id"];chk(await client.from(tb).delete().eq(col,id));await load(t)}}}
+ }}
+let photoMap=null,photoLoad=null;
+function loadPhotos(){if(!photoLoad)photoLoad=(async()=>{const r=await sb.from("photos").select("*");photoMap={};if(!r.error)(r.data||[]).forEach(p=>photoMap[p.key]=p.path)})();return photoLoad}
+const pubUrl=p=>sb.storage.from("photos").getPublicUrl(p).data.publicUrl;
+function initRemote(){
+ try{sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:true,autoRefreshToken:true}});DB=sbAdapter(sb)}catch(e){console.error(e);return false}
+ fb=true;mode="db";canWrite=false;
+ const apply=u=>{fbUser=u||null;const em=(u&&u.email||"").toLowerCase();canWrite=!!u&&(!OWNERS.length||OWNERS.includes(em));authMsg=u&&!canWrite?"Этот аккаунт не может редактировать список.":authMsg;if(u)loginOpen=false;rerender()};
+ sb.auth.getSession().then(({data})=>apply(data&&data.session&&data.session.user)).catch(()=>{});
+ sb.auth.onAuthStateChange((ev,session)=>{if(ev==="INITIAL_SESSION")return;apply(session&&session.user)});
+ subscribe(DB);route(true);return true}
+async function doLogin(kind){
+ const em=loginDraft.email.trim(),pw=loginDraft.pass;authMsg="";
+ if(!em||pw.length<6){authMsg="Введите почту и пароль не короче 6 символов.";rerender();return}
+ loginBusy=true;rerender();
+ try{const r=kind==="up"?await sb.auth.signUp({email:em,password:pw,options:{emailRedirectTo:location.origin+location.pathname}}):await sb.auth.signInWithPassword({email:em,password:pw});
+  if(r.error)throw r.error;
+  if(kind==="up"&&!r.data.session)authMsg="Аккаунт создан. Откройте письмо от Supabase, подтвердите почту и войдите.";}
+ catch(e){const m=String(e.message||"");authMsg=/Invalid login/i.test(m)?"Неверная почта или пароль.":/not confirmed/i.test(m)?"Почта ещё не подтверждена: откройте письмо от Supabase.":/already registered/i.test(m)?"Такой аккаунт уже есть, нажмите «Войти».":"Не получилось: "+m}
+ loginBusy=false;rerender()}
+function signOut(){sb.auth.signOut()}
+function authBar(){if(!fb)return"";
+ if(fbUser)return`<span class="auth">${esc(fbUser.email||"Вы вошли")} · <button class="linkbtn" data-auth="out">Выйти</button></span>`;
+ if(!loginOpen)return`<button class="ghost" data-auth="open">Войти, чтобы редактировать</button>`;
+ return`<form class="login" data-login novalidate><input type="email" id="lg-email" autocomplete="username" placeholder="Почта" value="${esc(loginDraft.email)}"><input type="password" id="lg-pass" autocomplete="current-password" placeholder="Пароль" value="${esc(loginDraft.pass)}">
+  <button class="addbtn" type="submit" ${loginBusy?"disabled":""}>${loginBusy?"…":"Войти"}</button><button class="linkbtn" type="button" data-auth="up">Создать аккаунт</button><button class="linkbtn" type="button" data-auth="close">Отмена</button></form>`}
+function bindAuth(){
+ app.querySelectorAll("[data-auth]").forEach(b=>b.onclick=()=>{const a=b.dataset.auth;if(a==="out")signOut();else if(a==="open"){loginOpen=true;authMsg="";rerender();const i=document.getElementById("lg-email");if(i)i.focus()}else if(a==="close"){loginOpen=false;authMsg="";rerender()}else if(a==="up")doLogin("up")});
+ const f=app.querySelector("[data-login]");if(f){const sync=()=>{loginDraft={email:f.querySelector("#lg-email").value,pass:f.querySelector("#lg-pass").value}};f.oninput=sync;f.onsubmit=e=>{e.preventDefault();sync();doLogin("in")}}}
 async function initData(){
+ if(SB_ON&&initRemote())return;
  const use=window.claude&&window.claude.use;if(!use){setLocal();return}
  let db=null,user=null;try{[db,user]=await Promise.all([window.claude.use("db"),window.claude.use("user")])}catch(e){}
  if(!db){setLocal();return}
  DB=db;mode="db";canWrite=user?user.can("data.write"):null;
- db.collection("wishes").onSnapshot(s=>{userWishes=s.docs.map(d=>toWish(d.id,d.data()||{})).sort((a,b)=>a.createdAt-b.createdAt);route(true)},()=>{});
- db.collection("notes").onSnapshot(s=>{const m={};s.docs.forEach(d=>{const x=d.data()||{};if(x.text)m[d.id]={text:String(x.text),date:String(x.date||"")}});notes=m;route(true)},()=>{});
- db.doc("marks/done").onSnapshot(s=>{const d=s.exists?s.data():null;done=new Set(d&&Array.isArray(d.ids)?d.ids:[]);route(true)},()=>{});
- route(true);
+ subscribe(db);route(true);
 }
 
 async function saveDone(){if(mode==="db"){try{await DB.doc("marks/done").set({ids:[...done]})}catch(e){formMsg="Не получилось сохранить отметку."}}else LS.set("uspet-done",[...done])}
@@ -620,15 +680,19 @@ async function removeWish(w){if(mode==="db"){await DB.doc("wishes/"+w.dbid).dele
 /* photos: per browser */
 const mem={};let dbp=null;
 function idb(){if(dbp)return dbp;dbp=new Promise((res,rej)=>{try{const q=indexedDB.open("uspet",1);q.onupgradeneeded=()=>q.result.createObjectStore("photos");q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)}catch(e){rej(e)}});return dbp}
-async function getPhoto(k){if(k in mem)return mem[k];try{const d=await idb();return await new Promise(res=>{const q=d.transaction("photos").objectStore("photos").get(k);q.onsuccess=()=>res(q.result||null);q.onerror=()=>res(null)})}catch(e){return null}}
-async function putPhoto(k,b){mem[k]=b;try{const d=await idb();d.transaction("photos","readwrite").objectStore("photos").put(b,k)}catch(e){}}
-async function delPhoto(k){mem[k]=null;try{const d=await idb();d.transaction("photos","readwrite").objectStore("photos").delete(k)}catch(e){}}
+function shrink(file){return new Promise((res,rej)=>{const url=URL.createObjectURL(file),im=new Image();im.onload=()=>{let w=im.naturalWidth,h=im.naturalHeight,q=.85,max=1400;const go=()=>{const k=Math.min(1,max/Math.max(w,h)),cv=document.createElement("canvas");cv.width=Math.round(w*k);cv.height=Math.round(h*k);cv.getContext("2d").drawImage(im,0,0,cv.width,cv.height);const d=cv.toDataURL("image/jpeg",q);if(d.length>900000&&max>500){max=Math.round(max*.8);q=Math.max(.6,q-.08);return go()}URL.revokeObjectURL(url);res(d)};go()};im.onerror=()=>rej(new Error("bad image"));im.src=url})}
+async function getPhoto(k){if(k in mem)return mem[k];if(fb){await loadPhotos();mem[k]=photoMap&&photoMap[k]?pubUrl(photoMap[k]):null;return mem[k]}try{const d=await idb();return await new Promise(res=>{const q=d.transaction("photos").objectStore("photos").get(k);q.onsuccess=()=>res(q.result||null);q.onerror=()=>res(null)})}catch(e){return null}}
+async function putPhoto(k,b){if(fb){const d=await shrink(b),blob=await (await fetch(d)).blob(),path=k+"-"+Date.now()+".jpg";
+  let r=await sb.storage.from("photos").upload(path,blob,{contentType:"image/jpeg",upsert:true});if(r.error)throw r.error;
+  r=await sb.from("photos").upsert({key:k,path,updated_at:Date.now()});if(r.error)throw r.error;
+  await loadPhotos();const old=photoMap[k];if(old&&old!==path)sb.storage.from("photos").remove([old]).catch(()=>{});photoMap[k]=path;mem[k]=pubUrl(path);return}mem[k]=b;try{const d=await idb();d.transaction("photos","readwrite").objectStore("photos").put(b,k)}catch(e){}}
+async function delPhoto(k){if(fb){await loadPhotos();const p=photoMap[k];let r=await sb.from("photos").delete().eq("key",k);if(r.error)throw r.error;if(p)await sb.storage.from("photos").remove([p]);delete photoMap[k];mem[k]=null;return}mem[k]=null;try{const d=await idb();d.transaction("photos","readwrite").objectStore("photos").delete(k)}catch(e){}}
 
 /* ---------- views ---------- */
 const app=document.getElementById("app"),pad=n=>String(n).padStart(2,"0");
 const esc=s=>String(s).replace(/[&<>"]/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
 async function frameFill(el,item,v,W,H){const cv=document.createElement("canvas");paint(cv,item,v,W,H);el.prepend(cv);
- const b=await getPhoto(item.id+"-"+v);if(b){const im=document.createElement("img");im.alt=item.caps[v];im.src=URL.createObjectURL(b);el.appendChild(im)}}
+ const b=await getPhoto(item.id+"-"+v);if(b){const im=document.createElement("img");im.alt=item.caps[v];im.src=typeof b==="string"?b:URL.createObjectURL(b);el.appendChild(im)}}
 let io=null;
 
 function home(){
@@ -647,7 +711,7 @@ function home(){
  <div class="tools">
   <div class="chips" role="group" aria-label="Категории">${["Все",...CATS].filter(c=>c==="Все"||counts[c]).map(c=>`<button class="fchip" data-cat="${c}" aria-pressed="${filter.cat===c}">${c}<span>${c==="Все"?items.length:counts[c]}</span></button>`).join("")}</div>
   <div class="right"><select class="status" id="status" aria-label="Статус"><option value="all">Все пункты</option><option value="todo">В планах</option><option value="done">Сделано</option></select>
-  ${writable&&!formOpen?`<button class="addbtn" id="openform">+ Добавить желание</button>`:""}</div>
+  ${writable&&!formOpen?`<button class="addbtn" id="openform">+ Добавить желание</button>`:""}${authBar()}</div>
  </div>
  ${formOpen?`<form class="addform" id="addform" novalidate><h2>Новое желание</h2>
   <div class="field"><label for="f-title">Что хочу сделать</label><input id="f-title" maxlength="120" required placeholder="Например: увидеть северное сияние" value="${esc(draft.title)}"></div>
@@ -660,8 +724,8 @@ function home(){
   <span class="num">${pad(i+1)}</span><span class="thumb" data-t="${it.id}"></span>
   <span class="rtext"><div class="rtitle">${esc(it.title)}</div><div class="rplace">${esc(it.cat)}${notes[it.id]?" · есть мой рассказ":""}</div></span>
   <span class="rend">${it.mine?`<span class="chip mine">добавлено</span>`:""}<span class="chip ${d?"done":""}">${d?"сделано":"в планах"}</span><span class="go" aria-hidden="true">→</span></span></a></li>`}).join("")}</ol>`:`<p class="empty">В этой категории пока ничего нет.</p>`}
- <p class="note">${mode==="local"?"Новые желания и отметки сохраняются в этом браузере. ":"Новые желания и отметки видны всем, кто открывает эту страницу. "}Кадры пока нарисованы. Внутри каждого пункта можно поставить свои фото, они хранятся в этом браузере.</p>`;
- drawForest();
+ ${authMsg&&fb?`<p class="msg">${esc(authMsg)}</p>`:""}<p class="note">${fb?"Всё хранится в базе Supabase: желания, отметки, рассказы и фото видят все, кто открывает сайт. Менять их может только владелец после входа.":mode==="local"?"Новые желания и отметки сохраняются в этом браузере. Кадры пока нарисованы, внутри каждого пункта можно поставить свои фото.":"Новые желания и отметки видны всем, кто открывает эту страницу. Кадры пока нарисованы. Внутри каждого пункта можно поставить свои фото, они хранятся в этом браузере."}</p>`;
+ drawForest();bindAuth();
  document.getElementById("status").value=filter.status;
  document.getElementById("status").onchange=e=>{filter.status=e.target.value;home()};
  app.querySelectorAll("[data-cat]").forEach(b=>b.onclick=()=>{filter.cat=b.dataset.cat;home()});
@@ -703,16 +767,16 @@ function entry(idx){
  app.innerHTML=`<a class="back" href="#list">← Весь список</a>
  <header class="ehead"><div class="eyebrow">Пункт ${pad(idx+1)} из ${items.length} · ${esc(it.cat)}</div><h1>${esc(it.title)}</h1></header>
  <section class="sheet" aria-label="Фотографии">${[0,1,2,3].map(v=>`<figure class="shot"><div class="frame" data-v="${v}"></div>
-  <figcaption><span><b>${pad(v+1)}</b>${esc(it.caps[v])}</span><button class="swap" data-swap="${v}">Своё фото</button></figcaption></figure>`).join("")}</section>
+  <figcaption><span><b>${pad(v+1)}</b>${esc(it.caps[v])}</span>${writable?`<button class="swap" data-swap="${v}">Своё фото</button>`:""}</figcaption></figure>`).join("")}</section>
  <div class="body"><article class="story" id="storybox"></article>
   <aside class="side">${writable?`<button class="toggle ${d?"on":""}" id="toggle"><span class="box">${d?"✓":""}</span>${d?"Сделано":"Отметить как сделанное"}</button>`:`<span class="chip ${d?"done":""}">${d?"сделано":"в планах"}</span>`}
-  <p>Свои фото хранятся только в этом браузере.</p>
+  <p>${fb?"Фото, отметки и рассказы сохраняются в базе и видны всем, кто открывает сайт.":"Свои фото хранятся только в этом браузере."}</p>${fb?`<div class="authrow">${authBar()}</div>${authMsg?`<div class="msg">${esc(authMsg)}</div>`:""}`:""}
   ${it.mine&&writable?(confirmDel?`<div class="confirm">Удалить пункт? <button class="yes" id="delyes">Удалить</button><button class="ghost" id="delno">Нет</button></div>`:`<button class="del" id="del">Удалить желание</button>`):""}</aside></div>
  <nav class="pager"><a href="#${prev.id}"><span class="eyebrow">← Предыдущий</span><span>${esc(prev.title)}</span></a><a href="#${next.id}"><span class="eyebrow">Следующий →</span><span>${esc(next.title)}</span></a></nav>`;
  app.querySelectorAll("[data-v]").forEach(el=>frameFill(el,it,+el.dataset.v,1200,900).then(()=>syncSwap(it,+el.dataset.v)));
  app.querySelectorAll("[data-swap]").forEach(b=>b.onclick=async()=>{const v=+b.dataset.swap,k=it.id+"-"+v,img=app.querySelector(`[data-v="${v}"] img`);
   if(img){await delPhoto(k);img.remove();syncSwap(it,v)}else{pending={it,v};const p=document.getElementById("picker");p.value="";p.click()}});
- renderStory(it);
+ renderStory(it);bindAuth();
  const t=document.getElementById("toggle");if(t)t.onclick=()=>{const was=done.has(it.id);was?done.delete(it.id):done.add(it.id);saveDone();if(!was&&!notes[it.id]&&canWrite!==false){editing=it.id;noteDraft={text:"",date:new Date().toISOString().slice(0,10)}}entry(idx);if(editing===it.id){const ta=document.getElementById("n-text");if(ta){ta.focus();ta.scrollIntoView({block:"center"})}}};
  const del=document.getElementById("del");if(del)del.onclick=()=>{confirmDel=true;entry(idx)};
  const no=document.getElementById("delno");if(no)no.onclick=()=>{confirmDel=false;entry(idx)};
@@ -744,11 +808,13 @@ async function saveNote(id,d){d.updatedAt=Date.now();
  else{if(d.text)notes[id]=d;else delete notes[id];LS.set("uspet-notes",notes)}}
 function syncSwap(it,v){const b=app.querySelector(`[data-swap="${v}"]`);if(b)b.textContent=app.querySelector(`[data-v="${v}"] img`)?"Вернуть рисунок":"Своё фото"}
 document.getElementById("picker").addEventListener("change",async e=>{const f=e.target.files&&e.target.files[0];if(!f||!pending)return;const {it,v}=pending;pending=null;
- await putPhoto(it.id+"-"+v,f);const el=app.querySelector(`[data-v="${v}"]`);if(!el)return;const im=document.createElement("img");im.alt=it.caps[v];im.src=URL.createObjectURL(f);el.appendChild(im);syncSwap(it,v)});
+ const sb=app.querySelector(`[data-swap="${v}"]`);if(sb)sb.textContent="Загружаю…";
+ try{await putPhoto(it.id+"-"+v,f)}catch(err){console.error(err);if(sb)sb.textContent="Не загрузилось";return}const el=app.querySelector(`[data-v="${v}"]`);if(!el)return;const im=document.createElement("img");im.alt=it.caps[v];im.src=URL.createObjectURL(f);el.appendChild(im);syncSwap(it,v)});
 
 let lastKey="";
-function route(fromData){
+function route(fromData,force){
  const id=location.hash.slice(1),items=all(),i=items.findIndex(x=>x.id===id),key=i>=0?id:"home";
+ if(force){if(i>=0)entry(i);else home();lastKey=key;return}
  if(fromData&&key!=="home"&&key===lastKey&&document.querySelector(".frame canvas")){const t=document.getElementById("toggle");if(t){const d=done.has(id);t.className="toggle "+(d?"on":"");t.innerHTML=`<span class="box">${d?"✓":""}</span>${d?"Сделано":"Отметить как сделанное"}`}if(editing!==id)renderStory(items[i]);return}
  if(fromData&&key==="home"&&formOpen&&document.activeElement&&document.activeElement.closest&&document.activeElement.closest("#addform"))return;
  if(!fromData){confirmDel=false;editing=null;noteMsg=""}
