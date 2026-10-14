@@ -590,7 +590,7 @@ function paint(cv,item,v,W,H){
 const LS={get(k,d){try{const v=localStorage.getItem(k);return v?JSON.parse(v):d}catch(e){return d}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v))}catch(e){}}};
 let mode="pending";       // pending | db | local
 let DB=null, canWrite=null;
-let done=new Set(), userWishes=[], notes={}, editing=null, noteDraft={text:"",date:""}, noteMsg="";
+let caps={}, done=new Set(), userWishes=[], notes={}, editing=null, noteDraft={text:"",date:""}, noteMsg="";
 let filter={cat:"Все",status:"all"}, formOpen=false, draft={title:"",cat:"Опыт",scene:"Комната",story:""}, formMsg="";
 
 function all(){return BASE.concat(userWishes)}
@@ -598,7 +598,7 @@ function hashSeed(s){let h=0;for(const ch of s)h=(h*31+ch.charCodeAt(0))|0;retur
 function toWish(id,d){const sc=SCENES[d.scene]||SCENES["Комната"];return{id:"u-"+id,dbid:id,mine:true,title:String(d.title||"Без названия"),cat:CATS.includes(d.cat)?d.cat:"Опыт",kind:sc[0],p:sc[1],
  caps:["Начало","В процессе","Главный момент","После"],story:String(d.story||"").split(/\n\s*\n/).filter(Boolean),seed:hashSeed(id),createdAt:d.createdAt||0}}
 
-function setLocal(){mode="local";done=new Set(LS.get("uspet-done",[]));notes=LS.get("uspet-notes",{});userWishes=LS.get("uspet-wishes",[]).map(w=>toWish(w.id,w));canWrite=true;route(true)}
+function setLocal(){mode="local";caps=LS.get("uspet-caps",{});done=new Set(LS.get("uspet-done",[]));notes=LS.get("uspet-notes",{});userWishes=LS.get("uspet-wishes",[]).map(w=>toWish(w.id,w));canWrite=true;route(true)}
 
 const SB_URL=(window.SUPABASE_URL||"").trim(),SB_KEY=(window.SUPABASE_ANON_KEY||"").trim();
 const SB_ON=!!(window.supabase&&window.supabase.createClient&&/^https:\/\/.+/.test(SB_URL)&&SB_KEY&&!/ВСТАВЬТЕ|YOUR/i.test(SB_URL+SB_KEY));
@@ -613,17 +613,22 @@ function subscribe(db){
  db.collection("wishes").onSnapshot(s=>{userWishes=s.docs.map(d=>toWish(d.id,d.data()||{})).sort((a,b)=>a.createdAt-b.createdAt);route(true)},err=>dbErr(err));
  db.collection("notes").onSnapshot(s=>{const m={};s.docs.forEach(d=>{const x=d.data()||{};if(x.text)m[d.id]={text:String(x.text),date:String(x.date||"")}});notes=m;route(true)},err=>dbErr(err));
  db.doc("marks/done").onSnapshot(s=>{const d=s.exists?s.data():null;done=new Set(d&&Array.isArray(d.ids)?d.ids:[]);route(true)},err=>dbErr(err));
+ db.collection("captions").onSnapshot(s=>{const m={};s.docs.forEach(d=>{const x=d.data()||{};if(x.text)m[d.id]=String(x.text)});caps=m;route(true)},err=>console.error(err));
 }
+const capOf=(it,v)=>caps[it.id+"-"+v]||it.caps[v];
+async function saveCap(key,text){text=text.trim();
+ if(mode==="db"){if(text)await DB.doc("captions/"+key).set({text,updatedAt:Date.now()});else await DB.doc("captions/"+key).delete()}
+ if(text)caps[key]=text;else delete caps[key];if(mode!=="db")LS.set("uspet-caps",caps)}
 /* Supabase adapter with the small document-style API the page already uses */
 function sbAdapter(client){
- const L={},cache={wishes:[],notes:[],marks:[]};
+ const L={},cache={wishes:[],notes:[],marks:[],captions:[]};
  const on=(t,f)=>(L[t]=L[t]||[]).push(f),emit=t=>(L[t]||[]).forEach(f=>f());
  const chk=r=>{if(r.error){const e=r.error;e.code=e.code||"";throw e}return r.data};
  async function load(t){cache[t]=chk(await client.from(t).select("*"))||[];emit(t)}
  const D=(id,d)=>({id,exists:true,data:()=>d});
  return{
   collection(t){return{
-   onSnapshot(cb,err){on(t,()=>cb({docs:t==="wishes"?cache.wishes.map(w=>D(w.id,{title:w.title,cat:w.cat,scene:w.scene,story:w.story,createdAt:Number(w.created_at)||0})):cache.notes.map(n=>D(n.item_id,{text:n.text,date:n.date}))}));load(t).catch(err)},
+   onSnapshot(cb,err){on(t,()=>cb({docs:t==="wishes"?cache.wishes.map(w=>D(w.id,{title:w.title,cat:w.cat,scene:w.scene,story:w.story,createdAt:Number(w.created_at)||0})):t==="captions"?cache.captions.map(c=>D(c.key,{text:c.text})):cache.notes.map(n=>D(n.item_id,{text:n.text,date:n.date}))}));load(t).catch(err)},
    async add(d){chk(await client.from("wishes").insert({title:d.title,cat:d.cat,scene:d.scene,story:d.story,created_at:d.createdAt}));await load("wishes")}}},
   doc(path){const [t,id]=path.split("/");return{
    onSnapshot(cb,err){on("marks",()=>cb({exists:true,data:()=>({ids:cache.marks.map(m=>m.item_id)})}));load("marks").catch(err)},
@@ -631,8 +636,9 @@ function sbAdapter(client){
     if(t==="marks"){const cur=new Set(cache.marks.map(m=>m.item_id)),nx=new Set(d.ids),add=[...nx].filter(x=>!cur.has(x)),rem=[...cur].filter(x=>!nx.has(x));
      if(add.length)chk(await client.from("marks").upsert(add.map(x=>({item_id:x,done_at:Date.now()}))));
      if(rem.length)chk(await client.from("marks").delete().in("item_id",rem));await load("marks")}
-    else if(t==="notes"){chk(await client.from("notes").upsert({item_id:id,text:d.text,date:d.date,updated_at:d.updatedAt}));await load("notes")}},
-   async delete(){const [tb,col]=t==="wishes"?["wishes","id"]:["notes","item_id"];chk(await client.from(tb).delete().eq(col,id));await load(t)}}}
+    else if(t==="notes"){chk(await client.from("notes").upsert({item_id:id,text:d.text,date:d.date,updated_at:d.updatedAt}));await load("notes")}
+    else if(t==="captions"){chk(await client.from("captions").upsert({key:id,text:d.text,updated_at:d.updatedAt}));await load("captions")}},
+   async delete(){const [tb,col]=t==="wishes"?["wishes","id"]:t==="captions"?["captions","key"]:["notes","item_id"];chk(await client.from(tb).delete().eq(col,id));await load(t)}}}
  }}
 let photoMap=null,photoLoad=null;
 function loadPhotos(){if(!photoLoad)photoLoad=(async()=>{const r=await sb.from("photos").select("*");photoMap={};if(!r.error)(r.data||[]).forEach(p=>photoMap[p.key]=p.path)})();return photoLoad}
@@ -643,7 +649,7 @@ function initRemote(){
  const apply=u=>{fbUser=u||null;const em=(u&&u.email||"").toLowerCase();canWrite=!!u&&(!OWNERS.length||OWNERS.includes(em));authMsg=u&&!canWrite?"Этот аккаунт не может редактировать список.":authMsg;if(u)loginOpen=false;rerender()};
  sb.auth.getSession().then(({data})=>apply(data&&data.session&&data.session.user)).catch(()=>{});
  sb.auth.onAuthStateChange((ev,session)=>{if(ev==="INITIAL_SESSION")return;apply(session&&session.user)});
- subscribe(DB);route(true);return true}
+ subscribe(DB);loadMusic();route(true);return true}
 async function doLogin(kind){
  const em=loginDraft.email.trim(),pw=loginDraft.pass;authMsg="";
  if(!em||pw.length<6){authMsg="Введите почту и пароль не короче 6 символов.";rerender();return}
@@ -692,7 +698,7 @@ async function delPhoto(k){if(fb){await loadPhotos();const p=photoMap[k];let r=a
 const app=document.getElementById("app"),pad=n=>String(n).padStart(2,"0");
 const esc=s=>String(s).replace(/[&<>"]/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[ch]));
 async function frameFill(el,item,v,W,H){const cv=document.createElement("canvas");paint(cv,item,v,W,H);el.prepend(cv);
- const b=await getPhoto(item.id+"-"+v);if(b){const im=document.createElement("img");im.alt=item.caps[v];im.src=typeof b==="string"?b:URL.createObjectURL(b);el.appendChild(im)}}
+ const b=await getPhoto(item.id+"-"+v);if(b){const im=document.createElement("img");im.alt=capOf(item,v);im.src=typeof b==="string"?b:URL.createObjectURL(b);el.appendChild(im)}}
 let io=null;
 
 function home(){
@@ -720,12 +726,12 @@ function home(){
   <div class="field"><label for="f-story">Короткий рассказ</label><textarea id="f-story" maxlength="1500" placeholder="Почему это в списке и как я это сделаю">${esc(draft.story)}</textarea></div>
   ${formMsg?`<div class="msg">${esc(formMsg)}</div>`:""}
   <div class="formrow"><button class="addbtn" type="submit" id="f-save">Добавить в список</button><button class="ghost" type="button" id="f-cancel">Отмена</button></div></form>`:""}
- ${shown.length?`<ol class="ledger">${shown.map(({it,i})=>{const d=done.has(it.id);return `<li><a class="row ${d?"done-row":""}" href="#${it.id}">
+ ${shown.length?`<ol class="ledger">${shown.map(({it,i},k)=>{const d=done.has(it.id);return `<li style="--i:${Math.min(k,20)}"><a class="row ${d?"done-row":""}" href="#${it.id}">
   <span class="num">${pad(i+1)}</span><span class="thumb" data-t="${it.id}"></span>
   <span class="rtext"><div class="rtitle">${esc(it.title)}</div><div class="rplace">${esc(it.cat)}${notes[it.id]?" · есть мой рассказ":""}</div></span>
   <span class="rend">${it.mine?`<span class="chip mine">добавлено</span>`:""}<span class="chip ${d?"done":""}">${d?"сделано":"в планах"}</span><span class="go" aria-hidden="true">→</span></span></a></li>`}).join("")}</ol>`:`<p class="empty">В этой категории пока ничего нет.</p>`}
- ${authMsg&&fb?`<p class="msg">${esc(authMsg)}</p>`:""}<p class="note">${fb?"Всё хранится в базе Supabase: желания, отметки, рассказы и фото видят все, кто открывает сайт. Менять их может только владелец после входа.":mode==="local"?"Новые желания и отметки сохраняются в этом браузере. Кадры пока нарисованы, внутри каждого пункта можно поставить свои фото.":"Новые желания и отметки видны всем, кто открывает эту страницу. Кадры пока нарисованы. Внутри каждого пункта можно поставить свои фото, они хранятся в этом браузере."}</p>`;
- drawForest();bindAuth();
+ ${authMsg&&fb?`<p class="msg">${esc(authMsg)}</p>`:""}${musicRow()}<p class="note">${fb?"Всё хранится в базе Supabase: желания, отметки, рассказы и фото видят все, кто открывает сайт. Менять их может только владелец после входа.":mode==="local"?"Новые желания и отметки сохраняются в этом браузере. Кадры пока нарисованы, внутри каждого пункта можно поставить свои фото.":"Новые желания и отметки видны всем, кто открывает эту страницу. Кадры пока нарисованы. Внутри каждого пункта можно поставить свои фото, они хранятся в этом браузере."}</p>`;
+ drawForest();bindAuth();bindMusic();
  document.getElementById("status").value=filter.status;
  document.getElementById("status").onchange=e=>{filter.status=e.target.value;home()};
  app.querySelectorAll("[data-cat]").forEach(b=>b.onclick=()=>{filter.cat=b.dataset.cat;home()});
@@ -745,15 +751,63 @@ function home(){
  if("IntersectionObserver" in window){io=new IntersectionObserver(es=>es.forEach(e=>{if(e.isIntersecting){fill(e.target);io.unobserve(e.target)}}),{rootMargin:"400px"});thumbs.forEach(t=>io.observe(t))}else thumbs.forEach(fill);
 }
 
-function drawForest(){
- const cv=document.getElementById("forestband");if(!cv)return;const box=cv.parentElement.getBoundingClientRect(),dpr=Math.min(2,window.devicePixelRatio||1);
- const W=Math.max(1,Math.round(box.width*dpr)),H=Math.max(1,Math.round(box.height*dpr));cv.width=W;cv.height=H;const c=cv.getContext("2d"),r=rng(4242),cs=getComputedStyle(document.documentElement);
- const tv=k=>cs.getPropertyValue(k).trim()||"#777",fog=tv("--fog");
- const layers=[["--tree1",.5,.55,.8],["--tree2",.64,.68,.9],["--tree3",.8,.85,1],["--tree4",.97,.8,.6]];
- layers.forEach(([k,base,hs,dens],li)=>{const col=tv(k),hh=H*hs;let x=-hh*.2;while(x<W+hh*.2){const h=hh*(.5+r()*.55);pine(c,x,H*base+r()*H*.06,h,col);x+=hh*(.09+r()*.16)/dens}
-  c.fillStyle=col;c.fillRect(0,H*base+H*.04,W,H);
-  const g=c.createLinearGradient(0,H*(base-.3),0,H*(base+.1));g.addColorStop(0,"rgba(0,0,0,0)");g.addColorStop(.7,fog);g.addColorStop(1,fog);c.fillStyle=g;if(li<3)c.fillRect(0,H*(base-.3),W,H)});
+let forest=null,fLoop=0,fVisible=true,fLast=0;
+const reduceMotion=()=>{try{return matchMedia("(prefers-reduced-motion: reduce)").matches}catch(e){return false}};
+function buildForest(){
+ const cv=document.getElementById("forestband");if(!cv){forest=null;return}const box=cv.parentElement.getBoundingClientRect(),dpr=Math.min(2,window.devicePixelRatio||1);
+ const W=Math.max(1,Math.round(box.width*dpr)),H=Math.max(1,Math.round(box.height*dpr));cv.width=W;cv.height=H;const r=rng(4242),cs=getComputedStyle(document.documentElement);
+ const tv=k=>cs.getPropertyValue(k).trim()||"#777";
+ const layers=[["--tree1",.5,.55,.8],["--tree2",.64,.68,.9],["--tree3",.8,.85,1],["--tree4",.97,.8,.6]].map(([k,base,hs,dens],li)=>{const hh=H*hs,trees=[];let x=-hh*.2;
+  while(x<W+hh*.2){const h=hh*(.5+r()*.55);trees.push({x,y:H*base+r()*H*.06,h,ph:r()*6.28,fl:.7+r()*.6});x+=hh*(.09+r()*.16)/dens}
+  return{col:tv(k),base,trees,li}});
+ forest={cv,c:cv.getContext("2d"),W,H,layers,fog:tv("--fog")};
 }
+function paintForest(t){if(!forest)return;const {c,W,H,layers,fog}=forest;c.clearRect(0,0,W,H);
+ const gust=Math.max(0,Math.sin(t*.13))**3*1.4;
+ layers.forEach(({col,base,trees,li})=>{const amp=.012+li*.006;
+  trees.forEach(tr=>{const k=(Math.sin(t*.7*tr.fl+tr.ph)*.6+Math.sin(t*1.9*tr.fl+tr.ph*2)*.18+gust*Math.sin(t*1.1+tr.x*.002))*amp;c.save();c.translate(tr.x,tr.y);c.transform(1,0,k,1,0,0);pine(c,0,0,tr.h,col);c.restore()});
+  c.fillStyle=col;c.fillRect(0,H*base+H*.04,W,H);
+  if(li<3){const g=c.createLinearGradient(0,H*(base-.3),0,H*(base+.1));g.addColorStop(0,"rgba(0,0,0,0)");g.addColorStop(.7,fog);g.addColorStop(1,fog);c.fillStyle=g;c.fillRect(0,H*(base-.3),W,H)}})}
+function forestTick(now){fLoop=requestAnimationFrame(forestTick);if(forest&&!forest.cv.isConnected)forest=null;if(!forest||!fVisible||document.hidden)return;if(now-fLast<33)return;fLast=now;paintForest(now/1000)}
+function drawForest(){buildForest();if(!forest)return;paintForest(performance.now()/1000);
+ if(!reduceMotion()&&!fLoop)fLoop=requestAnimationFrame(forestTick);
+ try{if(!drawForest.io){drawForest.io=new IntersectionObserver(es=>es.forEach(e=>fVisible=e.isIntersecting))}drawForest.io.disconnect();drawForest.io.observe(forest.cv)}catch(e){}}
+/* Forest ambience: wind + rustling leaves, synthesised with Web Audio; optional music track */
+const Amb={ctx:null,master:null,on:false,timer:0,audio:null,musicUrl:"",
+ noise(sec,brown){const c=this.ctx,b=c.createBuffer(1,c.sampleRate*sec,c.sampleRate),d=b.getChannelData(0);let last=0;for(let i=0;i<d.length;i++){const w=Math.random()*2-1;if(brown){last=(last+.02*w)/1.02;d[i]=last*3.5}else d[i]=w}return b},
+ build(){const C=window.AudioContext||window.webkitAudioContext;if(!C)return false;const c=this.ctx=new C();
+  this.master=c.createGain();this.master.gain.value=0;this.master.connect(c.destination);
+  const wind=c.createBufferSource();wind.buffer=this.noise(6,true);wind.loop=true;
+  const bp=c.createBiquadFilter();bp.type="bandpass";bp.frequency.value=380;bp.Q.value=.7;
+  const wg=c.createGain();wg.gain.value=.32;wind.connect(bp).connect(wg).connect(this.master);
+  const l1=c.createOscillator(),l1g=c.createGain();l1.frequency.value=.07;l1g.gain.value=.18;l1.connect(l1g).connect(wg.gain);
+  const l2=c.createOscillator(),l2g=c.createGain();l2.frequency.value=.043;l2g.gain.value=220;l2.connect(l2g).connect(bp.frequency);
+  const leaves=c.createBufferSource();leaves.buffer=this.noise(4,false);leaves.loop=true;
+  const hp=c.createBiquadFilter();hp.type="highpass";hp.frequency.value=2600;const pk=c.createBiquadFilter();pk.type="bandpass";pk.frequency.value=5200;pk.Q.value=.6;
+  this.lg=c.createGain();this.lg.gain.value=0;const trem=c.createGain();trem.gain.value=.6;const tr=c.createOscillator(),trg=c.createGain();tr.frequency.value=11;trg.gain.value=.4;tr.connect(trg).connect(trem.gain);
+  leaves.connect(hp).connect(pk).connect(trem).connect(this.lg).connect(this.master);
+  [wind,leaves,l1,l2,tr].forEach(n=>n.start());return true},
+ rustle(){if(!this.on)return;const c=this.ctx,t=c.currentTime,peak=.05+Math.random()*.09,up=.6+Math.random()*1.4,down=1+Math.random()*2.5;
+  this.lg.gain.cancelScheduledValues(t);this.lg.gain.setValueAtTime(this.lg.gain.value,t);this.lg.gain.linearRampToValueAtTime(peak,t+up);this.lg.gain.linearRampToValueAtTime(.008,t+up+down);
+  this.timer=setTimeout(()=>this.rustle(),(up+down)*1000+800+Math.random()*3500)},
+ setMusic(url){this.musicUrl=url||"";if(this.audio){this.audio.pause();this.audio=null}if(this.on&&this.musicUrl)this.playMusic()},
+ playMusic(){if(!this.musicUrl)return;if(!this.audio){this.audio=new Audio(this.musicUrl);this.audio.loop=true;this.audio.volume=0}const a=this.audio;a.play().catch(()=>{});let v=0;clearInterval(this.fade);this.fade=setInterval(()=>{v=Math.min(.38,v+.02);a.volume=v;if(v>=.38)clearInterval(this.fade)},120)},
+ async toggle(){if(!this.ctx&&!this.build())return;if(this.ctx.state==="suspended")await this.ctx.resume();this.on=!this.on;const t=this.ctx.currentTime;
+  this.master.gain.cancelScheduledValues(t);this.master.gain.setValueAtTime(this.master.gain.value,t);this.master.gain.linearRampToValueAtTime(this.on?.9:0,t+(this.on?2.5:1));
+  clearTimeout(this.timer);if(this.on){this.rustle();this.playMusic()}else if(this.audio){const a=this.audio;clearInterval(this.fade);this.fade=setInterval(()=>{a.volume=Math.max(0,a.volume-.03);if(a.volume<=0){clearInterval(this.fade);a.pause()}},80)}
+  const b=document.getElementById("soundbtn");b.setAttribute("aria-pressed",String(this.on));b.querySelector(".sl").textContent=this.on?"Звуки леса: вкл":"Звуки леса";LS.set("uspet-sound",this.on)}
+};
+document.getElementById("soundbtn").addEventListener("click",()=>Amb.toggle());
+if(LS.get("uspet-sound",false))document.getElementById("soundbtn").querySelector(".sl").textContent="Включить звуки леса";
+async function loadMusic(){if(!fb)return;try{const r=await sb.from("settings").select("*").eq("key","music");const row=r.data&&r.data[0];musicPath=row?row.value:"";Amb.setMusic(musicPath?sb.storage.from("audio").getPublicUrl(musicPath).data.publicUrl:"")}catch(e){}}
+let musicPath="",musicBusy=false;
+function musicRow(){if(!fb||!canWrite)return"";return`<div class="musicrow">Фоновая музыка: <span>${musicPath?esc(musicPath.replace(/^music-\d+-/,"")):"не загружена"}</span><button class="linkbtn" data-music="up" ${musicBusy?"disabled":""}>${musicBusy?"Загружаю…":musicPath?"Заменить трек":"Загрузить трек"}</button>${musicPath?`<button class="linkbtn" data-music="del">Убрать</button>`:""}</div>`}
+function bindMusic(){app.querySelectorAll("[data-music]").forEach(b=>b.onclick=async()=>{if(b.dataset.music==="up"){const p=document.getElementById("musicpick");p.value="";p.click()}else{try{await sb.from("settings").delete().eq("key","music");if(musicPath)await sb.storage.from("audio").remove([musicPath]);musicPath="";Amb.setMusic("");rerender()}catch(e){dbErr(e)}}})}
+document.getElementById("musicpick").addEventListener("change",async e=>{const f=e.target.files&&e.target.files[0];if(!f)return;if(f.size>25*1024*1024){authMsg="Файл больше 25 МБ.";rerender();return}
+ musicBusy=true;rerender();try{const safe=f.name.replace(/[^\w.\-]+/g,"_").slice(-60),path="music-"+Date.now()+"-"+safe;
+  let r=await sb.storage.from("audio").upload(path,f,{contentType:f.type||"audio/mpeg",upsert:true});if(r.error)throw r.error;
+  r=await sb.from("settings").upsert({key:"music",value:path});if(r.error)throw r.error;const old=musicPath;musicPath=path;if(old&&old!==path)sb.storage.from("audio").remove([old]).catch(()=>{});
+  Amb.setMusic(sb.storage.from("audio").getPublicUrl(path).data.publicUrl)}catch(err){dbErr(err)}musicBusy=false;rerender()});
 let fRaf=0;const redrawForest=()=>{cancelAnimationFrame(fRaf);fRaf=requestAnimationFrame(drawForest)};
 window.addEventListener("resize",redrawForest);
 try{matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{redrawForest();route(true)})}catch(e){}
@@ -766,8 +820,8 @@ function entry(idx){
  const writable=canWrite!==false;
  app.innerHTML=`<a class="back" href="#list">← Весь список</a>
  <header class="ehead"><div class="eyebrow">Пункт ${pad(idx+1)} из ${items.length} · ${esc(it.cat)}</div><h1>${esc(it.title)}</h1></header>
- <section class="sheet" aria-label="Фотографии">${[0,1,2,3].map(v=>`<figure class="shot"><div class="frame" data-v="${v}"></div>
-  <figcaption><span><b>${pad(v+1)}</b>${esc(it.caps[v])}</span>${writable?`<button class="swap" data-swap="${v}">Своё фото</button>`:""}</figcaption></figure>`).join("")}</section>
+ <section class="sheet" aria-label="Фотографии">${[0,1,2,3].map(v=>`<figure class="shot" style="--i:${v}"><div class="frame" data-v="${v}"></div>
+  <figcaption><span><b>${pad(v+1)}</b><span class="cap" data-cap="${v}">${esc(capOf(it,v))}</span>${writable?`<button class="capedit" data-capedit="${v}" aria-label="Изменить подпись к фото ${v+1}" title="Изменить подпись">✎</button>`:""}</span>${writable?`<button class="swap" data-swap="${v}">Своё фото</button>`:""}</figcaption></figure>`).join("")}</section>
  <div class="body"><article class="story" id="storybox"></article>
   <aside class="side">${writable?`<button class="toggle ${d?"on":""}" id="toggle"><span class="box">${d?"✓":""}</span>${d?"Сделано":"Отметить как сделанное"}</button>`:`<span class="chip ${d?"done":""}">${d?"сделано":"в планах"}</span>`}
   <p>${fb?"Фото, отметки и рассказы сохраняются в базе и видны всем, кто открывает сайт.":"Свои фото хранятся только в этом браузере."}</p>${fb?`<div class="authrow">${authBar()}</div>${authMsg?`<div class="msg">${esc(authMsg)}</div>`:""}`:""}
@@ -776,7 +830,7 @@ function entry(idx){
  app.querySelectorAll("[data-v]").forEach(el=>frameFill(el,it,+el.dataset.v,1200,900).then(()=>syncSwap(it,+el.dataset.v)));
  app.querySelectorAll("[data-swap]").forEach(b=>b.onclick=async()=>{const v=+b.dataset.swap,k=it.id+"-"+v,img=app.querySelector(`[data-v="${v}"] img`);
   if(img){await delPhoto(k);img.remove();syncSwap(it,v)}else{pending={it,v};const p=document.getElementById("picker");p.value="";p.click()}});
- renderStory(it);bindAuth();
+ renderStory(it);bindAuth();bindCaps(it);
  const t=document.getElementById("toggle");if(t)t.onclick=()=>{const was=done.has(it.id);was?done.delete(it.id):done.add(it.id);saveDone();if(!was&&!notes[it.id]&&canWrite!==false){editing=it.id;noteDraft={text:"",date:new Date().toISOString().slice(0,10)}}entry(idx);if(editing===it.id){const ta=document.getElementById("n-text");if(ta){ta.focus();ta.scrollIntoView({block:"center"})}}};
  const del=document.getElementById("del");if(del)del.onclick=()=>{confirmDel=true;entry(idx)};
  const no=document.getElementById("delno");if(no)no.onclick=()=>{confirmDel=false;entry(idx)};
@@ -806,6 +860,11 @@ function renderStory(it){
 async function saveNote(id,d){d.updatedAt=Date.now();
  if(mode==="db"){if(d.text)await DB.doc("notes/"+id).set(d);else await DB.doc("notes/"+id).delete();if(d.text)notes[id]=d;else delete notes[id]}
  else{if(d.text)notes[id]=d;else delete notes[id];LS.set("uspet-notes",notes)}}
+function bindCaps(it){app.querySelectorAll("[data-capedit]").forEach(b=>b.onclick=()=>{const v=+b.dataset.capedit,span=app.querySelector(`[data-cap="${v}"]`);if(!span||span.querySelector("input"))return;
+ const inp=document.createElement("input");inp.className="capinput";inp.maxLength=120;inp.value=capOf(it,v);inp.setAttribute("aria-label","Подпись к фото "+(v+1));span.textContent="";span.appendChild(inp);b.hidden=true;inp.focus();inp.select();
+ let done_=false;const finish=async save=>{if(done_)return;done_=true;const val=inp.value;span.textContent=save?(val.trim()||it.caps[v]):capOf(it,v);b.hidden=false;
+  if(save&&val.trim()!==capOf(it,v)){try{await saveCap(it.id+"-"+v,val===it.caps[v]?"":val)}catch(e){console.error(e);span.textContent=capOf(it,v);dbErr(e)}}};
+ inp.onkeydown=e=>{if(e.key==="Enter"){e.preventDefault();finish(true)}else if(e.key==="Escape"){finish(false)}};inp.onblur=()=>finish(true)})}
 function syncSwap(it,v){const b=app.querySelector(`[data-swap="${v}"]`);if(b)b.textContent=app.querySelector(`[data-v="${v}"] img`)?"Вернуть рисунок":"Своё фото"}
 document.getElementById("picker").addEventListener("change",async e=>{const f=e.target.files&&e.target.files[0];if(!f||!pending)return;const {it,v}=pending;pending=null;
  const sb=app.querySelector(`[data-swap="${v}"]`);if(sb)sb.textContent="Загружаю…";
@@ -815,10 +874,13 @@ let lastKey="";
 function route(fromData,force){
  const id=location.hash.slice(1),items=all(),i=items.findIndex(x=>x.id===id),key=i>=0?id:"home";
  if(force){if(i>=0)entry(i);else home();lastKey=key;return}
- if(fromData&&key!=="home"&&key===lastKey&&document.querySelector(".frame canvas")){const t=document.getElementById("toggle");if(t){const d=done.has(id);t.className="toggle "+(d?"on":"");t.innerHTML=`<span class="box">${d?"✓":""}</span>${d?"Сделано":"Отметить как сделанное"}`}if(editing!==id)renderStory(items[i]);return}
+ if(fromData&&key!=="home"&&key===lastKey&&document.querySelector(".frame canvas")){const t=document.getElementById("toggle");if(t){const d=done.has(id);t.className="toggle "+(d?"on":"");t.innerHTML=`<span class="box">${d?"✓":""}</span>${d?"Сделано":"Отметить как сделанное"}`}if(editing!==id)renderStory(items[i]);app.querySelectorAll("[data-cap]").forEach(sp=>{if(!sp.querySelector("input"))sp.textContent=capOf(items[i],+sp.dataset.cap)});return}
  if(fromData&&key==="home"&&formOpen&&document.activeElement&&document.activeElement.closest&&document.activeElement.closest("#addform"))return;
  if(!fromData){confirmDel=false;editing=null;noteMsg=""}
+ const fresh=!fromData||key!==lastKey;
+ if(fresh){app.classList.remove("enter");clearTimeout(route.t)}
  if(i>=0)entry(i);else if(id.startsWith("u-")&&mode==="pending"){app.innerHTML=`<p class="empty">Загружаю…</p>`}else home();
- if(!fromData||key!==lastKey)window.scrollTo(0,0);lastKey=key;
+ if(fresh){void app.offsetWidth;app.classList.add("enter");route.t=setTimeout(()=>app.classList.remove("enter"),2200)}
+ if(fresh)window.scrollTo(0,0);lastKey=key;
 }
 window.addEventListener("hashchange",()=>route(false));route(false);initData();setTimeout(()=>{if(mode==="pending")setLocal()},11000);
