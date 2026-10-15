@@ -64,7 +64,7 @@ const RAW = [
 ["Поплавать с акулами","Экстрим","dive","shark","Тень в воде|Рядом|Совсем близко|Подъём","Нырнуть туда, где плавают акулы, с инструктором или в клетке. Увидеть, что это не монстры из кино, а спокойные животные."],
 ["Купить револьвер","Вещи","room","revolver","Револьвер|Детали|Коллекция|Тир","Коллекционный револьвер, оформленный по закону, и пара выездов в тир. Научиться стрелять правильно и безопасно."],
 ["Научиться вязать разные узлы","Навыки","room","knots","Верёвка|Булинь|Восьмёрка|Все узлы","Булинь, восьмёрка, прямой, рифовый. Знать узлы, которые пригодятся в горах, на яхте и на рыбалке."],
-["Побывать на Луне","Путешествия","moon","","Земля над горизонтом|Шаги|Восход Земли|Флаг","Самая невозможная мечта в списке. Но частные полёты в космос уже есть, так что кто знает."],
+["Купить кеды","Вещи","room","sneakers","Пара на столе|Шнурки|Подошва|Первая прогулка","Хорошие кеды, в которых хочется ходить каждый день: удобные, с простым силуэтом и белой подошвой. Купить, разносить и не жалеть, что они пачкаются."],
 ["Пройти Minecraft","Игры","room","mc","Новый мир|Шахта|Портал|Финал","Дойти до Края и победить Дракона Края. Без гайдов, честно, с нуля."],
 ["Пройти все игры в библиотеке","Игры","room","lib","Библиотека|Сохранение|Ночь за игрой|100%","Пройти всё, что купил на распродажах и так и не запустил. Задача сложнее, чем кажется."],
 ["Приготовить газировку","Еда","room","soda","Сироп|Пузырьки|Бутылки|Первый глоток","Сварить сироп, газировать воду и сделать свою газировку. Лимонад с тархуном или с имбирём."],
@@ -432,6 +432,16 @@ const K = {
    const cols=["#f4a6c0","#a6d4f4","#f6dc8a","#b6e2a0","#d8b4f0","#e9a07a","#f0f0ea"];for(let i=0;i<16;i++)toy(x+(r()-.5)*W*.26,y-H*(.42+r()*.18),H*(.04+r()*.035),cols[i%7]);for(let i=0;i<6;i++)toy(W*(.12+i*.15)+(i>2?W*.2:0),desk+H*.12,H*.045,cols[(i+3)%7])}
   if(p==="knuckles"){const s=H*.1,x=cx-s*2.4,y=desk-s*1.1;c.fillStyle="#6a6e78";rr(c,x-s*.2,y+s*.85,s*5.2,s*.55,s*.25);c.fill();for(let i=0;i<4;i++){c.fillStyle="#7e828c";c.beginPath();c.arc(x+s*.55+i*s*1.2,y+s*.35,s*.6,0,7);c.fill();c.fillStyle=PAL.room[v][1];c.beginPath();c.arc(x+s*.55+i*s*1.2,y+s*.35,s*.38,0,7);c.fill()}
    c.fillStyle="rgba(255,255,255,.18)";c.fillRect(x,y+s*.9,s*4.8,s*.08);c.fillStyle="#3a3c42";for(let i=0;i<3;i++){c.beginPath();c.arc(x+s*(1.15+i*1.2),y+s*1.12,s*.08,0,7);c.fill()}}
+  if(p==="sneakers"){const shoe=(x,y,sz,flip,col)=>{c.save();c.translate(x,y);if(flip)c.scale(-1,1);
+    c.fillStyle="#f4f1e8";rr(c,-sz*1.05,-sz*.16,sz*2.1,sz*.2,sz*.08);c.fill();c.fillStyle="#d8d2c6";c.fillRect(-sz*1.05,-sz*.02,sz*2.1,sz*.06);
+    c.fillStyle=col;c.beginPath();c.moveTo(-sz*1,-sz*.16);c.lineTo(-sz*.95,-sz*.62);c.quadraticCurveTo(-sz*.85,-sz*.78,-sz*.55,-sz*.78);c.lineTo(-sz*.3,-sz*.72);c.quadraticCurveTo(.0,-sz*.5,sz*.55,-sz*.4);c.quadraticCurveTo(sz*1.02,-sz*.34,sz*1.02,-sz*.16);c.closePath();c.fill();
+    c.fillStyle="#f4f1e8";c.beginPath();c.moveTo(sz*.45,-sz*.16);c.quadraticCurveTo(sz*.9,-sz*.2,sz*1.02,-sz*.16);c.quadraticCurveTo(sz*1,-sz*.33,sz*.6,-sz*.38);c.quadraticCurveTo(sz*.5,-sz*.3,sz*.45,-sz*.16);c.fill();
+    c.strokeStyle="#f4f1e8";c.lineWidth=Math.max(1.5,sz*.035);c.lineCap="round";for(let i=0;i<5;i++){const lx=-sz*.25+i*sz*.13,ly=-sz*.66+i*sz*.06;c.beginPath();c.moveTo(lx-sz*.07,ly+sz*.02);c.lineTo(lx+sz*.07,ly-sz*.03);c.stroke()}
+    c.fillStyle="rgba(255,255,255,.18)";c.beginPath();c.ellipse(-sz*.55,-sz*.55,sz*.18,sz*.08,-.3,0,7);c.fill();c.restore()};
+   const cols=["#2a2c34","#a33a2e","#3a5a4a","#e9e4da"];const col=cols[v%4]===("#e9e4da")?"#2f4f78":cols[v%4];
+   shoe(cx-W*.13,desk+H*.04,H*.2,false,col);shoe(cx+W*.15,desk+H*.07,H*.2,true,col);
+   if(v===1){c.strokeStyle="#f4f1e8";c.lineWidth=3;c.beginPath();c.moveTo(cx-W*.05,desk-H*.08);c.bezierCurveTo(cx,desk+H*.02,cx+W*.04,desk-H*.02,cx+W*.08,desk+H*.03);c.stroke()}
+   if(v===0){c.fillStyle="#c9a46a";rr(c,W*.72,desk-H*.16,W*.2,H*.16,4);c.fill();c.fillStyle="#b08850";c.fillRect(W*.72,desk-H*.16,W*.2,H*.03)}}
   if(p==="mead"){const x=cx-W*.08,y=desk;c.fillStyle="#7a4a24";c.fillRect(x-W*.07,y-H*.28,W*.14,H*.28);c.fillStyle="#4a2a14";for(let k=0;k<3;k++)c.fillRect(x-W*.07,y-H*(.06+k*.09),W*.14,H*.015);c.strokeStyle="#7a4a24";c.lineWidth=W*.014;c.beginPath();c.arc(x+W*.07,y-H*.14,H*.07,-1.2,1.2);c.stroke();
    c.fillStyle="#f6e6c0";c.beginPath();c.ellipse(x,y-H*.28,W*.075,H*.03,0,0,7);c.fill();const jx=W*.7;c.fillStyle="rgba(240,180,50,.85)";rr(c,jx-W*.06,y-H*.22,W*.12,H*.22,10);c.fill();glow(c,jx,y-H*.1,W*.1,"rgba(255,190,60,.3)");c.fillStyle="#c9a46a";c.fillRect(jx-W*.065,y-H*.25,W*.13,H*.04);c.strokeStyle="#8a5a2a";c.lineWidth=W*.006;c.beginPath();c.moveTo(jx+W*.01,y-H*.08);c.lineTo(jx+W*.08,y-H*.38);c.stroke()}
   if(["samsa","coffee","fancy","soda"].includes(p)){c.fillStyle="#e9e4da";c.beginPath();c.ellipse(cx,desk+H*.08,W*.22,H*.08,0,0,7);c.fill();c.fillStyle="#d8d2c6";c.beginPath();c.ellipse(cx,desk+H*.08,W*.16,H*.055,0,0,7);c.fill();
